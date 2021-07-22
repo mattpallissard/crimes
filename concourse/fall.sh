@@ -109,10 +109,6 @@ out (){
 	unset_pipes
 }
 
-iter_teams() {
-	[ -n "$1" ] && bail 1 "supply a command"
-
-}
 
 set_auth(){
 	set_pipes
