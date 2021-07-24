@@ -1,0 +1,10 @@
+github-release,4
+pull-request,18
+git,49
+github-webhook,3
+docker-image,22
+slack-notification,10
+concourse-git-semver-tag,0
+time,9
+s3,1
+terraform,6

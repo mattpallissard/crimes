@@ -1,0 +1,4 @@
+(executable
+  (name parse)
+  (libraries yojson lwt.unix lwt_ppx)
+  (preprocess (pps lwt_ppx)))
