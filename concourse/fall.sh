@@ -71,15 +71,16 @@ show_help () {
 	printf "Usage: %s [OPTION...]\n\n" "$0"
 	printf "    -l, --login-all [initial target]     Login to all targets.\n"
 	printf "                                         Opens a web browser tab to log into all targets.\n"
-	printf "                                             it is recommened to log into concoure ui\n"
-	printf "                                             prior to running the this command\n"
+	printf "                                             it is recommened to log into concourse ui\n"
+	printf "                                             via firefox prior to running the this command\n"
 	printf "                                         [initial target] defaults to 'gs'\n\n"
 
 	printf "    -r, --resources [target]             print json representing resources for a given project\n"
 	printf "                                         if [target] is omitted, all resources are listed'\n"
-	printf "                                         try: \`%s -r | tee foo.json | jq\`\n" "$0"
+	printf "                                         try: \`%s -r | tee foo.json | jq\`\n\n" "$0"
+
 	printf "    -c, --check-resources [target]       run a resource check for a given project\n"
-	printf "                                         if [target] is omitted, all resources are listed'\n"
+	printf "                                         if [target] is omitted, all resources are checked'\n"
 	exit 0
 }
 
