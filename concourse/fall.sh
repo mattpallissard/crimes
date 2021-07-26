@@ -49,6 +49,13 @@ main () {
 				get_resources
 				exit 0
 				;;
+			-c | --check-resources)
+				if [ -n "$2" ]; then
+					teams="$2"
+				fi
+			  check_resources
+				exit 0
+				;;
 			-h | --help)
 				show_help
 				;;
@@ -71,6 +78,8 @@ show_help () {
 	printf "    -r, --resources [target]             print json representing resources for a given project\n"
 	printf "                                         if [target] is omitted, all resources are listed'\n"
 	printf "                                         try: \`%s -r | tee foo.json | jq\`\n" "$0"
+	printf "    -c, --check-resources [target]       run a resource check for a given project\n"
+	printf "                                         if [target] is omitted, all resources are listed'\n"
 	exit 0
 }
 
@@ -139,6 +148,21 @@ get_pipelines() {
 		done < <(
 		fly -t "$1" pipelines
 	)
+
+}
+
+
+check_resources() {
+	for i in $teams; do
+		get_pipelines "$i"
+		for j in "${!pipelines[@]}"; do
+			while read -r name rest; do
+				fly -t "$i" check-resource --resource="$j/$name"
+			done < <(
+				fly resources -t "$i" -p "$j"
+			)
+		done
+	done
 
 }
 
