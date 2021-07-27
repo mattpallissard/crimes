@@ -2,6 +2,7 @@
 
 workdir=/tmp
 teams=""
+regexp="NULL"
 declare -A pipelines=()
 declare -A paths=(
 	[stdin]="$workdir"/fly.stdin
@@ -19,14 +20,23 @@ declare -A cmd=(
 	[fly]=fly
 	[mkfifo]=mkfifo
 	[unlink]=rm
+	[sleep]=sleep
 	[ff]=firefox
 	[pkill]=pkill
+	[ctx]=/usr/local/bin/concourse/bin/ctr
 )
 
 declare -A fly=(
 	[target]=gs
 	[c]=https://ci.spire.sh
 )
+
+declare -A k8s=(
+	[ns]=concourse
+	[sleep]=3
+)
+
+
 
 
 main () {
@@ -56,8 +66,21 @@ main () {
 			  check_resources
 				exit 0
 				;;
+			-p | --purge-containers)
+				if [ -n "$2" ]; then
+					regexp=${2##*/}
+					teams=${2%%/*}
+				else
+					printf "please supply 'team/regexp'\n" >&2
+					show_help
+					exit 1
+				fi
+				purge_containers
+				exit 0
+				;;
 			-h | --help)
 				show_help
+				exit 0
 				;;
 			*)
 				printf "Help, I've fallen and I can't get up!\n  Try --help.\n" >&2
@@ -80,20 +103,26 @@ show_help () {
 	printf "                                         try: \`%s -r | tee foo.json | jq\`\n\n" "$0"
 
 	printf "    -c, --check-resources [target]       run a resource check for a given project\n"
-	printf "                                         if [target] is omitted, all resources are checked'\n"
-	exit 0
+	printf "                                         if [target] is omitted, all resources are checked'\n\n"
+
+	printf "    -p, --purge-containers target/regexp ensure all builds are aborted and containers removed\n"
+	printf "                                         in the supplied project AND matching the provided\n"
+	printf "                                         regexp for example if one wanted to remove all\n"
+	printf "                                         containers matching 'subnet-exporter' OR 'foo' in\n'"
+	printf "                                         'blue-ground-services' they could try:\n"
+	printf '                                          `%s -r -p blue-ground-services/subnet-exporter|foo`\n' "$0"
+	printf "                                         NOTE: '-p' uses bash shell expansion to separate on '/'\n"
+	printf "                                               DO NOT supply a '/' in the regexp\n\n"
 }
 
 bail () {
-        if [ -z "$1" ]
-        then
-                printf "no exit code returned\n"
-                return 1
-        elif [ "$1" -ne 0 ]
-        then
-                [[ -z "$2" ]] && printf "failed\n" || printf "%s\n" "$2"
-        fi
-        exit "$1"
+	if [ -z "$1" ]; then
+		printf "no exit code returned\n"
+		return 1
+	elif [ "$1" -ne 0 ]; then
+		[[ -z "$2" ]] && printf "failed\n" || printf "%s\n" "$2"
+	fi
+	exit "$1"
 }
 
 set_pipes () {
@@ -198,6 +227,24 @@ get_resources() {
 	done
 	printf ']'
 
+}
+
+
+purge_containers() {
+	while read -r cont host build; do
+		printf "\n\n%s %s %s\n" "$cont" "$host" "$build"
+		fly -t prod abort-build -b "$build" && \
+		kubectl -n ground-services exec pod/"$host" -- /bin/bash -c "\
+			${cmd[ctx]} --namespace=${k8s[ns]} t kill -a $cont ;\
+			${cmd[sleep]} $${k8s[sleep]} ;\
+			${cmd[ctx]} --namespace=${k8s[ns]} container rm $cont \
+				|| { ${cmd[ctx]} --namespace=${k8s[ns]} t kill -a -s 9 $cont ; ${cmd[sleep]} ${k8s[sleep]} ; } ;\
+			${cmd[ctx]} --namespace=${k8s[ns]} container rm $cont \
+				|| { printf 'FAIL: %s\n' $cont >&2 ; return 1 ; }"
+					done < <(\
+		fly -t "$teams" containers \
+		| grep -E "$regexp" \
+		| awk '{print $1 " " $2 " " $6}')
 }
 
 trap out EXIT
