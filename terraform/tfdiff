@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+
+function strip_colors {
+	sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[m|K]//g"
+}
+
+function tfdiff {
+
+# usage
+# terraform plan -lock=false |tee plan.out
+# tfdiff --file plan.out
+
+
+# notes
+# Resource actions are indicated with the following symbols:
+#  [31m-[0m destroy
+#  [32m+[0m create
+#  [33m~[0m update in-place
+#  [36m<=[0m read (data resources)
+#
+#  if you copy-paste this you may lose the control codes '^[' is added by ^v + ^[
+#
+	local extension=.tfdiff
+	local prefix=/tmp/
+	while (($#)); do
+		case "$1" in
+		--file)
+			local file=$2; shift 2
+			;;
+		--extension)
+			local extension=$2; shift 2
+			;;
+		*)
+			printf 'unknown argument %s' "$1"; return 1
+			;;
+		esac
+	done
+	local add="$prefix"add"$extension"
+	local destroy="$prefix"destroy"$extension"
+	[ -n "$file" ] || { printf "supply a terraform plan file\n" 1>&2 ; return 1 ; }
+	[ -f "$file" ] || { printf "file does not exist: %s\n" $file 1>&2 ; return 1; }
+
+	\grep -v '\[32m' "$file" | strip_colors > "$destroy" || return 2
+	\grep -v '\[31m' "$file" | strip_colors > "$add" || return 3
+	nvim -d "$add" "$destroy"
+	[ -f "$add" ] && unlink "$add"
+	[ -f "$destroy" ] && unlink "$destroy"
+}
+
+tfdiff "$@"
