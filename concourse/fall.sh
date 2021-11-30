@@ -17,6 +17,7 @@ declare -A fds=(
 )
 
 declare -A cmd=(
+	[date]=date
 	[fly]=fly
 	[mkfifo]=mkfifo
 	[unlink]=rm
@@ -36,7 +37,10 @@ declare -A k8s=(
 	[sleep]=3
 )
 
-
+count=0
+pids=[]
+current_time="$(${cmd[date]} +%s)"
+max_time=$((current_time - 604800))
 
 
 main () {
@@ -46,11 +50,29 @@ main () {
 				if [ -n "$2" ]; then
 					fly[target]="$2"
 				fi
-
-				echo ${fly[target]}
+				set_auth
 				exit 0
-				login
+				;;
+			-j | --jobs)
+				if [ -n "$2" ]; then
+					teams="$2"
+				fi
+				get_jobs
 				exit 0
+				;;
+			-o | --old)
+				if [ -n "$2" ]; then
+					teams="$2"
+				fi
+				list_old
+				break
+				;;
+			-p | --pause-old)
+				if [ -n "$2" ]; then
+					teams="$2"
+				fi
+				pause_old
+				break
 				;;
 			-r | --resources)
 				if [ -n "$2" ]; then
@@ -66,7 +88,7 @@ main () {
 			  check_resources
 				exit 0
 				;;
-			-p | --purge-containers)
+			--purge-containers)
 				if [ -n "$2" ]; then
 					regexp=${2##*/}
 					teams=${2%%/*}
@@ -119,10 +141,10 @@ show_help () {
 
 bail () {
 	if [ -z "$1" ]; then
-		printf "no exit code returned\n"
+		printf "no exit code returned\n" 1>&2
 		return 1
 	elif [ "$1" -ne 0 ]; then
-		[[ -z "$2" ]] && printf "failed\n" || printf "%s\n" "$2"
+		[[ -z "$2" ]] && printf "failed\n" 1>&2 || printf "%s\n" "$2" 1>&2
 	fi
 	exit "$1"
 }
@@ -146,8 +168,16 @@ get_teams() {
 }
 
 out (){
-	"${cmd[pkill]}" "${cmd[fly]}"
+	printf "caught INT\n" 1>&2
+	for pid in ${pids[*]}; do
+		printf "killing %s\n" "$pid" 1>&2
+		kill -0 "$pid" 2>/dev/null \
+			&& kill "$pid"
+	done
+	final="$(jobs -p)"
+	[ -n "$final" ] && kill "$final" 2>/dev/null
 	unset_pipes
+	exit 1
 }
 
 
@@ -175,6 +205,7 @@ set_auth(){
 }
 
 get_pipelines() {
+		pipelines=()
 		while read -r id name paused rest; do
 			pipelines["$name"]="$id $paused"
 		done < <(
@@ -232,6 +263,69 @@ get_resources() {
 
 }
 
+get_jobs() {
+	[ "$teams" == "" ] && get_teams
+	for i in $teams; do
+		get_pipelines "$i"
+		for j in "${!pipelines[@]}"; do
+			while read -r id name last_build; do
+				flock -x 1
+				printf "%s %s %s %s %s\n" "$id" "$i" "$j" "$name" "$last_build"
+				flock -u 1
+			done < <(
+					fly jobs -t "$i" -p "$j" --json 2>/dev/null\
+					| jq -r '.[] | "\(.id) \(.name) \(.finished_build.start_time)"' \
+						; [ "${PIPESTATUS[0]}" -eq 0 ] \
+						|| bail 1 "failed to get jobs: $i/$j"
+			) &
+			pids[$(get_count)]=$!
+			wait_pids
+		done
+	done
+}
+
+get_count(){
+	printf "%s\n" $count
+	((count++))
+}
+
+wait_pids() {
+		while [ "$count" -ne 0 ]; do
+			kill -0 $pid 2>/dev/null \
+				&& wait ${pids[$count]}
+			unset ${pids[$count]}
+			((count--))
+		done
+}
+
+to_date(){
+	date --date=@"$1"
+}
+
+list_old() {
+	while read -r id team pipeline job last_build; do
+		if [[ "$last_build" == 'null' ]] || [ "$last_build" -lt 0 ]; then
+			flock -x 2
+			printf "%s %s/%s has invalid time for last run: %s\n" \
+				"$team" "$pipeline" "$job" "$last_build" 1>&2
+			flock -u 2
+				continue
+		fi
+
+	[[ "$last_build" -lt "$max_time" ]] \
+		&& printf "%s %s %s\n" "$team" "$pipeline" "$job";
+	done < <(get_jobs)
+}
+
+pause_old(){
+	while read -r team pipeline job; do
+		echo fly pj -t "$team" -j "$pipeline/$job" &
+			pids[$(get_count)]=$!
+	done < <(list_old)
+	wait_pids
+
+}
+
 
 purge_containers() {
 	while read -r cont host build; do
@@ -250,5 +344,5 @@ purge_containers() {
 		| awk '{print $1 " " $2 " " $6}')
 }
 
-trap out EXIT
+trap out INT EXIT TERM
 main "$@"
