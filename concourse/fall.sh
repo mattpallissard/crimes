@@ -25,6 +25,9 @@ declare -A cmd=(
 	[ff]=firefox
 	[pkill]=pkill
 	[ctx]=/usr/local/bin/concourse/bin/ctr
+	[grep]=grep
+	[awk]=awk
+	[kubectl]=kubectl
 )
 
 declare -A fly=(
@@ -40,8 +43,12 @@ declare -A k8s=(
 count=0
 pids=[]
 current_time="$(${cmd[date]} +%s)"
-max_time=$((current_time - 604800))
-
+if [ -n $MAX_PIPELINE_IDLE_TIME ]; then
+	idle=$MAX_PIPELINE_IDLE_TIME
+else
+	idle=604800
+fi
+max_time=$((current_time - idle))
 
 main () {
 	while (($#)); do
@@ -53,6 +60,14 @@ main () {
 				set_auth
 				exit 0
 				;;
+			--max-pipeline-idle)
+				if [ -n "$2" ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+					max_time=$((current_time - $2))
+				else
+					toerr "invalid max-pipeline-idle: \'%s\'." "$2"
+				fi
+				shift 2
+				;;
 			-j | --jobs)
 				if [ -n "$2" ]; then
 					teams="$2"
@@ -60,18 +75,32 @@ main () {
 				get_jobs
 				exit 0
 				;;
-			-o | --old)
+			--list-stale-jobs)
 				if [ -n "$2" ]; then
 					teams="$2"
 				fi
 				list_old
 				break
 				;;
-			-p | --pause-old)
+			--pause-stale-jobs)
 				if [ -n "$2" ]; then
 					teams="$2"
 				fi
 				pause_old
+				break
+				;;
+			--stale-pipelines)
+				if [ -n "$2" ]; then
+					teams="$2"
+				fi
+				stale_pipelines
+				break
+				;;
+			--pause-stale-pipelines)
+				if [ -n "$2" ]; then
+					teams="$2"
+				fi
+				stale_pipelines
 				break
 				;;
 			-r | --resources)
@@ -109,6 +138,8 @@ main () {
 				exit 1
 		esac
 	done
+	printf "nothing to do\n  Try --help.\n"
+	exit 0
 }
 
 
@@ -127,26 +158,49 @@ show_help () {
 	printf "    -c, --check-resources [target]       run a resource check for a given project\n"
 	printf "                                         if [target] is omitted, all resources are checked'\n\n"
 
+	printf "        --pause-stale-pipelines [target] pause all stale pipelines in a given target\n"
+	printf "                                         if [target] is omitted, all targets are checked'\n\n"
+
+	printf "        --max-pipeline-idle seconds      maximum number of seconds between now and when any job\n"
+	printf "                                         within a pipeline has ran\n"
+	printf "                                             defaults to 604800\n"
+	printf '                                             can also be set via $MAX_PIPELINE_IDLE_TIME\n\n'
+
 	printf "    -p, --purge-containers target/regexp ensure all builds are aborted and containers removed\n"
 	printf "                                         in the supplied project AND matching the provided\n"
 	printf "                                         regexp for example if one wanted to remove all\n"
 	printf "                                         containers matching 'bar' OR 'foo' in\n'"
 	printf "                                         'fizzbuzz' they could try:\n"
+	#shellcheck disable=SC2016
 	printf '                                          `%s -r -p fizzbuzz/subnet-exporter|foo`\n' "$0"
 	printf "                                         NOTE: '-p' uses bash shell expansion to separate on '/'\n"
 	printf "                                               DO NOT supply a '/' in the regexp\n\n"
-	printf "                                         NOTE: '-p' is not a general solution, it is implementation"
+	printf "                                         NOTE: '-p' is not a general solution, it is implementation\n"
 	printf "                                               specific\n"
 }
 
 bail () {
 	if [ -z "$1" ]; then
-		printf "no exit code returned\n" 1>&2
-		return 1
+		toerr "no exit code returned\n" 1>&2
+		exit 1
 	elif [ "$1" -ne 0 ]; then
-		[[ -z "$2" ]] && printf "failed\n" 1>&2 || printf "%s\n" "$2" 1>&2
+		{ [[ -z "$2" ]] && toerr "failed\n" 1>&2; } || toerr "%s\n" "$2"
 	fi
 	exit "$1"
+}
+
+
+toout(){
+	flock -x "${fds[stdout]}"
+	#shellcheck disable=SC2059
+	printf "$@"
+	flock -u "${fds[stdout]}"
+}
+toerr(){
+	flock -x "${fds[stderr]}"
+	#shellcheck disable=SC2059
+	printf "$@" 1>&2
+	flock -u "${fds[stderr]}"
 }
 
 set_pipes () {
@@ -159,7 +213,7 @@ set_pipes () {
 unset_pipes () {
 	for i in "${paths[@]}"; do
 	[ -f "$i" ] && \
-		{ "${cmd[unlink]}" "$i" ||  printf 'failed to unlink %s\n' "$i" >&2 ; }
+		{ "${cmd[unlink]}" "$i" ||  toerr 'failed to unlink %s\n' "$i" ; }
 	done
 }
 
@@ -168,9 +222,7 @@ get_teams() {
 }
 
 out (){
-	printf "caught INT\n" 1>&2
 	for pid in ${pids[*]}; do
-		printf "killing %s\n" "$pid" 1>&2
 		kill -0 "$pid" 2>/dev/null \
 			&& kill "$pid"
 	done
@@ -198,7 +250,8 @@ set_auth(){
 		echo "$i $pid"
 
 		while read -r line; do
-			[[ $line == *"https"* ]] && { ${cmd[ff]} -new-tab -url "$line" ; break ; }
+			[[ $line == *"https"* ]] && \
+				{ ${cmd[ff]} -new-tab -url "$line" ; break ; }
 		done < "${paths[stdout]}"
 		wait $pid
 	done
@@ -209,7 +262,7 @@ get_pipelines() {
 		while read -r id name paused rest; do
 			pipelines["$name"]="$id $paused"
 		done < <(
-		fly -t "$1" pipelines
+		${cmd[fly]} -t "$1" pipelines
 	)
 
 }
@@ -221,9 +274,9 @@ check_resources() {
 		get_pipelines "$i"
 		for j in "${!pipelines[@]}"; do
 			while read -r name rest; do
-				fly -t "$i" check-resource --resource="$j/$name"
+				${cmd[fly]} -t "$i" check-resource --resource="$j/$name"
 			done < <(
-				fly resources -t "$i" -p "$j"
+				${cmd[fly]} resources -t "$i" -p "$j"
 			)
 		done
 	done
@@ -234,6 +287,7 @@ check_resources() {
 get_resources() {
 	# don't judge me monkey
 	[ "$teams" == "" ] && get_teams
+	flock -x "${fds[stdout]}"
 	printf '['
 	for i in $teams; do
 		[ -n "$ft" ] && printf ","
@@ -248,7 +302,7 @@ get_resources() {
 				printf '{"name": "%s","type": "%s"}' "$name" "$type"
 				fj=true
 			done < <(\
-				fly resources -t "$i" -p "$j"
+				${cmd[fly]} resources -t "$i" -p "$j"
 			)
 			unset fj
 			printf "]}"
@@ -260,6 +314,7 @@ get_resources() {
 		ft=true
 	done
 	printf ']'
+	flock -u "$stderr"
 
 }
 
@@ -269,11 +324,9 @@ get_jobs() {
 		get_pipelines "$i"
 		for j in "${!pipelines[@]}"; do
 			while read -r id name last_build; do
-				flock -x 1
-				printf "%s %s %s %s %s\n" "$id" "$i" "$j" "$name" "$last_build"
-				flock -u 1
+				toout "%s %s %s %s %s\n" "$id" "$i" "$j" "$name" "$last_build"
 			done < <(
-					fly jobs -t "$i" -p "$j" --json 2>/dev/null\
+					${cmd[fly]} jobs -t "$i" -p "$j" --json 2>/dev/null\
 					| jq -r '.[] | "\(.id) \(.name) \(.finished_build.start_time)"' \
 						; [ "${PIPESTATUS[0]}" -eq 0 ] \
 						|| bail 1 "failed to get jobs: $i/$j"
@@ -285,8 +338,10 @@ get_jobs() {
 }
 
 get_count(){
+	flock -x "${fds[stdout]}"
 	printf "%s\n" $count
 	((count++))
+	flock -u "${fds[stdout]}"
 }
 
 wait_pids() {
@@ -302,13 +357,41 @@ to_date(){
 	date --date=@"$1"
 }
 
+stale_pipelines(){
+	do_pause=1
+	dont_pause=0
+	declare -A p=()
+	while read -r id team pipeline job last_build; do
+		key="$team $pipeline"
+		[ -n "${p[$key]}" ] && [ "${p[$key]}" -eq $dont_pause ] && continue
+		[ "$last_build" == 'null' ] && continue
+	  [ "$last_build" -lt 0 ] && continue
+
+		if [ "$last_build" -gt "$max_time" ]; then
+			 p["$key"]=$dont_pause
+			 continue
+		fi
+
+		p[$key]=$do_pause
+	done < <(get_jobs)
+
+	for i in "${!p[@]}"; do
+		[ ${p[$i]} -eq $do_pause ] && toout "%s\n" "$i";
+	done
+}
+
+disable_stale_pipelines(){
+	while read -r team pipeline; do
+		#printf "disabling: %s.%s\n" "$team" "$pipeline"
+		toout "${cmd[fly]}" -t "$team" pause-pipeline "$pipeline"
+	done < <(stale_pipelines)
+}
+
 list_old() {
 	while read -r id team pipeline job last_build; do
 		if [[ "$last_build" == 'null' ]] || [ "$last_build" -lt 0 ]; then
-			flock -x 2
-			printf "%s %s/%s has invalid time for last run: %s\n" \
+			toout "%s %s/%s has invalid time for last run: %s\n" \
 				"$team" "$pipeline" "$job" "$last_build" 1>&2
-			flock -u 2
 				continue
 		fi
 
@@ -319,19 +402,17 @@ list_old() {
 
 pause_old(){
 	while read -r team pipeline job; do
-		echo fly pj -t "$team" -j "$pipeline/$job" &
+		toout "${cmd[fly]}" pj -t "$team" -j "$pipeline/$job" &
 			pids[$(get_count)]=$!
 	done < <(list_old)
 	wait_pids
-
 }
-
 
 purge_containers() {
 	while read -r cont host build; do
 		printf "\n\n%s %s %s\n" "$cont" "$host" "$build"
-		fly -t prod abort-build -b "$build" && \
-		kubectl --namespace=${k8s[ns]} exec pod/"$host" -- /bin/bash -c "\
+		${cmd[fly]} -t prod abort-build -b "$build" && \
+		${cmd[kubectl]} --namespace="${k8s[ns]}" exec pod/"$host" -- /bin/bash -c "\
 			${cmd[ctx]} --namespace=${k8s[ns]} t kill -a $cont ;\
 			${cmd[sleep]} $${k8s[sleep]} ;\
 			${cmd[ctx]} --namespace=${k8s[ns]} container rm $cont \
@@ -339,9 +420,10 @@ purge_containers() {
 			${cmd[ctx]} --namespace=${k8s[ns]} container rm $cont \
 				|| { printf 'FAIL: %s\n' $cont >&2 ; return 1 ; }"
 					done < <(\
-		fly -t "$teams" containers \
-		| grep -E "$regexp" \
-		| awk '{print $1 " " $2 " " $6}')
+		#shellcheck disable=SC2016
+		${cmd[fly]} -t "$teams" containers \
+		| ${cmd[grep]} -E "$regexp" \
+		| ${cmd[awk]} '{print $1 " " $2 " " $6}')
 }
 
 trap out INT EXIT TERM
